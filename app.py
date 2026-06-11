@@ -1,171 +1,148 @@
 import streamlit as st
+import auth
+import database
+import dashboard
+import history
+import profile
 import analyzer
+import time
 
-# ---------------- SESSION SETUP ----------------
-if "users" not in st.session_state:
-    st.session_state.users = {}
+# Set page configuration
+st.set_page_config(
+    page_title="AI Resume Analyzer",
+    page_icon="📄",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+# Initialize Database
+database.init_db()
 
-if "username" not in st.session_state:
-    st.session_state.username = ""
-
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-
-# ---------------- AUTH ----------------
-def login():
-    st.title("🔐 Login")
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-        if username in st.session_state.users and st.session_state.users[username] == password:
-            st.session_state.logged_in = True
-            st.session_state.username = username
-            st.success("Login successful!")
-            st.rerun()
+def render_analyzer_page():
+    st.title("📄 AI Resume Analyzer")
+    st.write("Upload your resume and provide a job description to get AI-powered insights.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("1. Upload Resume")
+        uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+        
+    with col2:
+        st.subheader("2. Job Description")
+        job_description = st.text_area("Paste the job description here", height=200)
+        
+    if st.button("Analyze Resume", type="primary", use_container_width=True):
+        if uploaded_file is None:
+            st.error("Please upload a resume (PDF).")
+        elif not job_description.strip():
+            st.error("Please provide a job description.")
         else:
-            st.error("Invalid credentials")
-
-
-def register():
-    st.title("📝 Register")
-
-    username = st.text_input("New Username")
-    password = st.text_input("New Password", type="password")
-
-    if st.button("Register"):
-        if username in st.session_state.users:
-            st.warning("User already exists")
-        else:
-            st.session_state.users[username] = password
-            st.success("Registered successfully! Go to login.")
-
-
-# ---------------- DASHBOARD ----------------
-def dashboard():
-    st.title(f"👋 Welcome {st.session_state.username}")
-
-    menu = st.sidebar.radio(
-        "Navigation",
-        ["Resume Analyzer", "History", "Profile", "Logout"]
-    )
-
-    if menu == "Resume Analyzer":
-        analyzer_page()
-    elif menu == "History":
-        history_page()
-    elif menu == "Profile":
-        profile_page()
-    elif menu == "Logout":
-        st.session_state.logged_in = False
-        st.rerun()
-
-
-# ---------------- ANALYZER PAGE ----------------
-def analyzer_page():
-    st.header("📄 AI Resume Analyzer")
-
-    uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
-    job_description = st.text_area("Paste Job Description")
-
-    mode = st.radio("AI Mode", ["Ollama (Local)", "BYOK (OpenAI)"])
-
-    api_key = None
-    if mode == "BYOK (OpenAI)":
-        api_key = st.text_input("Enter API Key", type="password")
-
-    if st.button("Analyze Resume"):
-        if uploaded_file and job_description:
-
-            with st.spinner("Analyzing..."):
-
+            with st.spinner("Analyzing resume against job description..."):
+                # Extract text
                 resume_text = analyzer.extract_text_from_pdf(uploaded_file)
-
-                results = analyzer.analyze_resume(
-                    resume_text,
+                
+                if not resume_text:
+                    st.error("Could not extract text from the PDF. Please try a different file.")
+                    return
+                
+                # Analyze
+                results = analyzer.analyze_resume(resume_text, job_description)
+                
+                # Save to database
+                database.save_analysis(
+                    st.session_state['user_id'],
+                    uploaded_file.name,
                     job_description,
-                    mode="ollama" if mode == "Ollama (Local)" else "openai",
-                    api_key=api_key
+                    results['ats_score'],
+                    results['match_percentage'],
+                    results['missing_keywords'],
+                    results['suggestions']
                 )
+                
+                st.success("Analysis Complete!")
+                
+                # Display Results
+                st.markdown("---")
+                st.header("Analysis Results")
+                
+                score_col, chart_col = st.columns([1, 2])
+                
+                with score_col:
+                    st.metric(label="ATS Match Score", value=f"{results['ats_score']}%")
+                    st.progress(results['ats_score'] / 100.0)
+                    
+                with chart_col:
+                    st.subheader("Keyword Match")
+                    st.write(f"**Matched:** {len(results['matched_keywords'])} | **Missing:** {len(results['missing_keywords'])}")
+                    
+                st.markdown("---")
+                
+                tab1, tab2, tab3 = st.tabs(["AI Suggestions", "Missing Keywords", "Matched Keywords"])
+                
+                with tab1:
+                    st.subheader("AI Feedback")
+                    suggestions = results['suggestions']
+                    if "error" in suggestions:
+                        st.error(suggestions["error"])
+                    else:
+                        st.write(f"**Overall Assessment:** {suggestions['summary']}")
+                        
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.write("**Areas for Improvement:**")
+                            for area in suggestions.get('improvement_areas', []):
+                                st.write(f"- {area}")
+                                
+                        with col_b:
+                            st.write("**Formatting Tips:**")
+                            for tip in suggestions.get('formatting_tips', []):
+                                st.write(f"- {tip}")
+                                
+                with tab2:
+                    st.subheader("Missing Keywords")
+                    st.write("These keywords are present in the job description but missing from your resume. Consider adding them if you have the relevant experience.")
+                    if results['missing_keywords']:
+                        for kw in results['missing_keywords']:
+                            st.markdown(f"- `{kw}`")
+                    else:
+                        st.write("Great job! You matched all major keywords.")
+                        
+                with tab3:
+                    st.subheader("Matched Keywords")
+                    if results['matched_keywords']:
+                        for kw in results['matched_keywords']:
+                            st.markdown(f"- ✅ `{kw}`")
 
-                # SAVE HISTORY
-                st.session_state.history.append(results)
-
-                # DISPLAY RESULTS
-                st.subheader("📊 ATS Score")
-                st.metric("Score", results["ats_score"])
-
-                st.subheader("📈 Match Percentage")
-                st.progress(results["match_percentage"] / 100)
-
-                st.subheader("✅ Matched Keywords")
-                st.write(results["matched_keywords"])
-
-                st.subheader("❌ Missing Keywords")
-                st.write(results["missing_keywords"])
-
-                st.subheader("💡 Suggestions")
-
-                if "error" in results["suggestions"]:
-                    st.error(results["suggestions"]["error"])
-                else:
-                    st.write("**Summary:**")
-                    st.write(results["suggestions"]["summary"])
-
-                    st.write("**Improvements:**")
-                    for item in results["suggestions"]["improvement_areas"]:
-                        st.write(f"- {item}")
-
-                    st.write("**Formatting Tips:**")
-                    for item in results["suggestions"]["formatting_tips"]:
-                        st.write(f"- {item}")
-
-        else:
-            st.warning("Please upload resume and job description")
-
-
-# ---------------- HISTORY ----------------
-def history_page():
-    st.header("📜 Analysis History")
-
-    if not st.session_state.history:
-        st.info("No history yet")
-        return
-
-    for i, item in enumerate(st.session_state.history[::-1]):
-        st.subheader(f"Analysis {i+1}")
-        st.write(f"ATS Score: {item['ats_score']}")
-        st.write(f"Match: {item['match_percentage']}%")
-        st.write("---")
-
-
-# ---------------- PROFILE ----------------
-def profile_page():
-    st.header("👤 Profile")
-
-    st.write(f"Username: {st.session_state.username}")
-    st.write(f"Total Analyses: {len(st.session_state.history)}")
-
-
-# ---------------- MAIN ----------------
 def main():
-    st.sidebar.title("AI Resume Analyzer")
-
-    if not st.session_state.logged_in:
-        choice = st.sidebar.radio("Menu", ["Login", "Register"])
-
-        if choice == "Login":
-            login()
-        else:
-            register()
+    if not auth.is_authenticated():
+        auth.login_page()
     else:
-        dashboard()
-
+        # Sidebar Navigation
+        with st.sidebar:
+            st.title("Menu")
+            st.write(f"Hello, **{st.session_state['user_name']}**!")
+            st.markdown("---")
+            
+            page = st.radio(
+                "Navigation",
+                ["Dashboard", "Resume Analyzer", "Analysis History", "Profile"]
+            )
+            
+            st.markdown("---")
+            if st.button("Logout"):
+                auth.logout_user()
+                st.rerun()
+                
+        # Page Routing
+        if page == "Dashboard":
+            dashboard.render_dashboard()
+        elif page == "Resume Analyzer":
+            render_analyzer_page()
+        elif page == "Analysis History":
+            history.render_history()
+        elif page == "Profile":
+            profile.render_profile()
 
 if __name__ == "__main__":
     main()
